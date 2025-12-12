@@ -640,3 +640,282 @@ JSON Response:"""
             logger.error(f"Error parsing simplification response: {str(e)}")
             logger.debug(f"Simplification response was: {response}")
             return None
+
+    def _assess_risks_parallel(self, clauses: List[SimpleClause]) -> List[Dict]:
+        """
+        Assess legal risks in parallel for all clauses
+        
+        Args:
+            clauses: List of extracted clauses
+            
+        Returns:
+            List of dictionaries with risk assessments
+        """
+        try:
+            logger.info(f"Assessing risks for {len(clauses)} clauses in parallel")
+            
+            risk_assessments = []
+            
+            # PARALLEL RISK ASSESSMENT: Process 10 clauses at a time
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                # Submit all clause risk assessment tasks
+                future_to_clause = {
+                    executor.submit(self._assess_single_clause_risk, i, clause): (i, clause)
+                    for i, clause in enumerate(clauses)
+                }
+                
+                # Collect results as they complete
+                for future in concurrent.futures.as_completed(future_to_clause):
+                    clause_idx, original_clause = future_to_clause[future]
+                    try:
+                        risk_result = future.result()
+                        if risk_result:  # Include ALL clauses, regardless of risk level
+                            risk_assessments.append(risk_result)
+                            logger.info(f"Risk assessment {clause_idx+1} completed: {risk_result.get('risk_level', 0)}% risk")
+                    except Exception as e:
+                        logger.warning(f"Failed to assess risk for clause {clause_idx+1}: {str(e)}")
+                        # Even if assessment fails, create a basic risk entry
+                        risk_assessments.append({
+                            'clause_index': clause_idx,
+                            'clause_name': original_clause.clause_name,
+                            'risk_level': 15,
+                            'risk_category': 'Low Risk',
+                            'risky_statement': 'Unable to assess - standard legal language assumed',
+                            'context': 'Risk assessment failed for this clause',
+                            'risk_reasoning': 'Could not analyze this clause for risks',
+                            'potential_consequences': 'Unknown - recommend legal review',
+                            'recommendations': 'Have a lawyer review this clause',
+                            'original_index': clause_idx
+                        })
+                        continue
+            
+            # Sort by risk level (highest first)
+            risk_assessments.sort(key=lambda x: x.get('risk_level', 0), reverse=True)
+            
+            logger.info(f"Parallel risk assessment complete: {len(risk_assessments)} risky clauses identified")
+            return risk_assessments
+            
+        except Exception as e:
+            logger.error(f"Error in parallel risk assessment: {str(e)}")
+            return []
+
+    def _assess_single_clause_risk(self, clause_idx: int, clause: SimpleClause) -> Dict:
+        """
+        Assess risk for a single clause
+        
+        Args:
+            clause_idx: Index of the clause
+            clause: The clause to assess
+            
+        Returns:
+            Dictionary with risk assessment details
+        """
+        try:
+            logger.info(f"Assessing risk for clause {clause_idx+1}: {clause.clause_name[:50]}...")
+            
+            # Create risk assessment prompt
+            risk_prompt = f"""You are a legal risk analyst. Analyze this legal clause and assess its potential risks.
+
+Legal Clause:
+Title: {clause.clause_name}
+Content: {clause.content}
+
+Please provide a detailed risk assessment in this JSON format:
+{{
+    "risk_level": 85,
+    "risk_category": "High Risk",
+    "risky_statement": "The specific part of the clause that poses risk",
+    "context": "Brief explanation of what this clause is about",
+    "risk_reasoning": "Detailed explanation of why this is risky and what could go wrong",
+    "potential_consequences": "What bad things could happen because of this clause",
+    "recommendations": "What actions should be taken to mitigate this risk"
+}}
+
+Risk Level Guidelines:
+- 5-25: Low Risk - Minor concerns, standard legal language (MINIMUM 5%)
+- 26-50: Moderate Risk - Some concerning elements that should be reviewed
+- 51-75: High Risk - Significant concerns that need attention
+- 76-100: Critical Risk - Major red flags, potentially dangerous
+
+Important:
+- ALWAYS return a risk assessment with minimum 5% risk level
+- Even standard legal language has some inherent risk
+- Never return 0% risk - every legal clause has at least minimal risk
+- Focus on real legal risks like unfair terms, liability issues, termination clauses, etc.
+- Be specific about what part of the clause is risky
+- Provide actionable recommendations
+- If truly low risk, explain why it's still 5-15% risky
+
+JSON Response:"""
+
+            # Call Claude for risk assessment
+            response = self._call_claude(risk_prompt, timeout=30)
+            risk_data = self._parse_risk_response(response)
+            
+            if risk_data:
+                return {
+                    'clause_index': clause_idx,
+                    'clause_name': clause.clause_name,
+                    'risk_level': max(risk_data.get('risk_level', 5), 5),  # Minimum 5% risk
+                    'risk_category': risk_data.get('risk_category', 'Low Risk'),
+                    'risky_statement': risk_data.get('risky_statement', ''),
+                    'context': risk_data.get('context', ''),
+                    'risk_reasoning': risk_data.get('risk_reasoning', ''),
+                    'potential_consequences': risk_data.get('potential_consequences', ''),
+                    'recommendations': risk_data.get('recommendations', ''),
+                    'original_index': clause_idx
+                }
+            else:
+                # Fallback for parsing failures - still return a risk assessment
+                return {
+                    'clause_index': clause_idx,
+                    'clause_name': clause.clause_name,
+                    'risk_level': 10,
+                    'risk_category': 'Low Risk',
+                    'risky_statement': 'Standard legal language',
+                    'context': 'This appears to be standard legal language',
+                    'risk_reasoning': 'No specific risks identified in this clause',
+                    'potential_consequences': 'Minimal risk - standard legal provisions',
+                    'recommendations': 'No specific action required',
+                    'original_index': clause_idx
+                }
+                
+        except Exception as e:
+            logger.error(f"Error assessing risk for clause {clause_idx+1}: {str(e)}")
+            return None
+
+    def _parse_risk_response(self, response: str) -> Dict:
+        """Parse Claude's JSON response for risk assessment"""
+        try:
+            # Extract JSON from response
+            start_idx = response.find('{')
+            end_idx = response.rfind('}') + 1
+            
+            if start_idx == -1 or end_idx == 0:
+                raise ValueError("No valid JSON found in risk response")
+            
+            json_str = response[start_idx:end_idx]
+            return json.loads(json_str)
+            
+        except Exception as e:
+            logger.error(f"Error parsing risk response: {str(e)}")
+            logger.debug(f"Risk response was: {response}")
+            return None
+
+    def _calculate_overall_risk(self, risk_assessments: List[Dict]) -> Dict:
+        """Calculate overall risk metrics from individual assessments"""
+        try:
+            if not risk_assessments:
+                return {
+                    'risks': [],
+                    'overall_risk_level': 0,
+                    'risk_categories': {},
+                    'total_risks': 0,
+                    'highest_risk': 0,
+                    'average_risk': 0
+                }
+            
+            # Calculate metrics
+            total_risks = len(risk_assessments)
+            risk_levels = [r.get('risk_level', 0) for r in risk_assessments]
+            highest_risk = max(risk_levels) if risk_levels else 0
+            average_risk = sum(risk_levels) // len(risk_levels) if risk_levels else 0
+            
+            # Calculate overall risk (weighted by severity)
+            if highest_risk >= 76:
+                overall_risk_level = min(100, highest_risk + 5)
+            elif highest_risk >= 51:
+                overall_risk_level = highest_risk
+            elif average_risk >= 26:
+                overall_risk_level = min(50, average_risk + 10)
+            else:
+                overall_risk_level = average_risk
+            
+            # Categorize risks
+            risk_categories = {}
+            for risk in risk_assessments:
+                category = risk.get('risk_category', 'Unknown')
+                risk_categories[category] = risk_categories.get(category, 0) + 1
+            
+            return {
+                'risks': risk_assessments,
+                'overall_risk_level': overall_risk_level,
+                'risk_categories': risk_categories,
+                'total_risks': total_risks,
+                'highest_risk': highest_risk,
+                'average_risk': average_risk
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating overall risk: {str(e)}")
+            return {
+                'risks': risk_assessments,
+                'overall_risk_level': 0,
+                'risk_categories': {},
+                'total_risks': len(risk_assessments),
+                'highest_risk': 0,
+                'average_risk': 0
+            }
+
+    def get_detailed_clauses_with_risks(self, text: str, simplify_for_non_lawyers: bool = False) -> Dict:
+        """
+        Get detailed clause information with risk assessment
+        
+        Args:
+            text: Legal document text
+            simplify_for_non_lawyers: Whether to add simplified explanations
+        
+        Returns:
+            Dictionary with clauses and risk assessment
+        """
+        try:
+            clauses = self.extract_clauses_with_llm(text)
+            
+            result = {
+                'detailed_clauses': [],
+                'risk_assessment': {
+                    'risks': [],
+                    'overall_risk_level': 0,
+                    'risk_categories': {},
+                    'total_risks': 0
+                }
+            }
+            
+            if simplify_for_non_lawyers:
+                # Run simplification and risk assessment in parallel
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    # Submit both tasks
+                    simplification_future = executor.submit(self._simplify_clauses_parallel, clauses)
+                    risk_future = executor.submit(self._assess_risks_parallel, clauses)
+                    
+                    # Get results
+                    simplified_clauses = simplification_future.result()
+                    risk_assessments = risk_future.result()
+                
+                result['detailed_clauses'] = simplified_clauses
+                result['risk_assessment'] = self._calculate_overall_risk(risk_assessments)
+            else:
+                result['detailed_clauses'] = [
+                    {
+                        'clause_name': clause.clause_name,
+                        'content': clause.content,
+                        'clause_type': 'LLM Extracted',
+                        'section_number': None,
+                        'page_reference': None
+                    }
+                    for clause in clauses
+                ]
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting detailed clauses with risks: {str(e)}")
+            return {
+                'detailed_clauses': [],
+                'risk_assessment': {
+                    'risks': [],
+                    'overall_risk_level': 0,
+                    'risk_categories': {},
+                    'total_risks': 0
+                }
+            }

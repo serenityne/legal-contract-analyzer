@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import ChatInterface from './ChatInterface';
 
 const App = () => {
   const [methods, setMethods] = useState([]);
@@ -11,6 +12,7 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('clauses');
   const [hoveredClause, setHoveredClause] = useState(null);
   const [dragActive, setDragActive] = useState(false);
+  const [cachedResults, setCachedResults] = useState({});
 
   // Load available methods on component mount
   useEffect(() => {
@@ -82,6 +84,18 @@ const App = () => {
       return;
     }
 
+    // Check cache first
+    const cacheKey = `${file.name}_${file.size}_${selectedMethod}`;
+    if (cachedResults[cacheKey]) {
+      console.log('Using cached results for:', file.name);
+      setResults(cachedResults[cacheKey]);
+      updateStatus('Using cached analysis results', '', '');
+      setTimeout(() => {
+        setStatus({ message: '', progress: '', thinking: '' });
+      }, 1500);
+      return;
+    }
+
     setIsProcessing(true);
     setResults(null);
     setActiveTab('clauses');
@@ -114,6 +128,14 @@ const App = () => {
 
       if (response.data.success) {
         setResults(response.data);
+        
+        // Cache the results
+        const newCacheKey = `${file.name}_${file.size}_${selectedMethod}`;
+        setCachedResults(prev => ({
+          ...prev,
+          [newCacheKey]: response.data
+        }));
+        
         const clauseCount = response.data.detailed_clauses?.length || 0;
         if (selectedMethod === 'bedrock_llm') {
           updateStatus(`Analysis Complete: ${clauseCount} clauses extracted with plain English explanations`, '', '');
@@ -223,8 +245,41 @@ const App = () => {
     return <PDFViewerComparison originalText={originalText} clauses={clauses} hoveredClause={hoveredClause} onClauseHover={handleClauseHover} />;
   };
 
+  const renderRisksTab = () => {
+    if (!results) {
+      return (
+        <div style={{ textAlign: 'center', color: '#718096', marginTop: '3rem' }}>
+          <i className="fas fa-shield-alt" style={{ fontSize: '3rem', marginBottom: '1rem' }}></i>
+          <p>Upload and analyze a document to see risk assessment here.</p>
+        </div>
+      );
+    }
+
+    const riskAssessment = results.risk_assessment;
+    const isAIPowered = results.processing_method === 'bedrock_llm';
+
+    // Debug logging
+    console.log('Risk Tab Debug:', {
+      processing_method: results.processing_method,
+      isAIPowered,
+      has_risk_assessment: riskAssessment,
+      risk_data: riskAssessment
+    });
+
+    if (!isAIPowered) {
+      return (
+        <div style={{ textAlign: 'center', color: '#718096', marginTop: '3rem' }}>
+          <i className="fas fa-robot" style={{ fontSize: '3rem', marginBottom: '1rem' }}></i>
+          <p>Use AI-Powered Analysis to get detailed risk assessment.</p>
+        </div>
+      );
+    }
+
+    return <RiskAnalysis riskAssessment={riskAssessment} />;
+  };
+
   return (
-    <div className={`app ${activeTab === 'comparison' && results?.processing_metadata?.has_simplification ? 'comparison-mode' : ''}`}>
+    <div className="app">
       {/* Header */}
       <header className="header">
         <div className="header-content">
@@ -236,8 +291,9 @@ const App = () => {
         </div>
       </header>
 
-      <div className="main-container">
-        {/* Sidebar */}
+      <div className={`main-container ${results ? 'with-results' : ''}`}>
+        {/* Sidebar - Hide after results */}
+        {!results && (
         <div className="sidebar">
           <h2>
             <i className="fas fa-cogs"></i>
@@ -319,9 +375,10 @@ const App = () => {
             </button>
           </div>
         </div>
+        )}
 
-        {/* Main Content */}
-        <div className="main-content">
+        {/* Main Content - Full width when results available */}
+        <div className={`main-content ${results ? 'with-chat' : ''}`}>
           {/* Status Display */}
           {(status.message || status.progress || status.thinking) && (
             <div className="status-container">
@@ -348,14 +405,32 @@ const App = () => {
                 <i className="fas fa-columns"></i>
                 Side-by-Side Comparison
               </button>
+              <button
+                className={`tab ${activeTab === 'risks' ? 'active' : ''}`}
+                onClick={() => setActiveTab('risks')}
+              >
+                <i className="fas fa-exclamation-triangle"></i>
+                Risk Analysis
+              </button>
             </div>
 
             <div className="tab-panel">
               {activeTab === 'clauses' && renderClausesTab()}
               {activeTab === 'comparison' && renderComparisonTab()}
+              {activeTab === 'risks' && renderRisksTab()}
             </div>
           </div>
         </div>
+
+        {/* Chat Interface - Show only when results are available */}
+        {results && (
+          <div className="chat-panel">
+            <ChatInterface 
+              documentContext={results}
+              documentInfo={results.document_info}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -432,116 +507,76 @@ const ClauseCard = ({ clause, index, isSimplified, onHover, isHighlighted }) => 
   );
 };
 
-// PDF Viewer Comparison Component with Synchronized Scrolling
+// Clean Side-by-Side Comparison Component (Like Mockup)
 const PDFViewerComparison = ({ originalText, clauses, hoveredClause, onClauseHover }) => {
   const leftViewerRef = React.useRef(null);
   const rightViewerRef = React.useRef(null);
   const [selectedClause, setSelectedClause] = useState(null);
-  const [isScrollSyncing, setIsScrollSyncing] = useState(false);
 
-  // Synchronized scrolling handler
-  const handleScroll = useCallback((sourceRef, targetRef) => {
-    if (isScrollSyncing) return;
-    
-    setIsScrollSyncing(true);
-    const sourceElement = sourceRef.current;
-    const targetElement = targetRef.current;
-    
-    if (sourceElement && targetElement) {
-      const scrollPercentage = sourceElement.scrollTop / (sourceElement.scrollHeight - sourceElement.clientHeight);
-      const targetScrollTop = scrollPercentage * (targetElement.scrollHeight - targetElement.clientHeight);
-      
-      // Use requestAnimationFrame for smooth scrolling
-      requestAnimationFrame(() => {
-        targetElement.scrollTop = targetScrollTop;
-        setTimeout(() => setIsScrollSyncing(false), 50);
-      });
-    } else {
-      setIsScrollSyncing(false);
-    }
-  }, [isScrollSyncing]);
+  // Simple clause hover handler
+  const handleClauseHover = (clauseIndex) => {
+    onClauseHover(clauseIndex);
+  };
 
-  // Highlight clause handler
+  // Simple clause click handler
   const handleClauseClick = (clauseIndex) => {
     setSelectedClause(clauseIndex === selectedClause ? null : clauseIndex);
     onClauseHover(clauseIndex === selectedClause ? null : clauseIndex);
   };
 
-  // Find text in original document for highlighting
-  const highlightOriginalText = (text, clauses, selectedClause) => {
-    if (!selectedClause || selectedClause < 0 || !clauses[selectedClause]) {
-      return text;
-    }
-
-    const clause = clauses[selectedClause];
-    const clauseContent = clause.content || '';
-    
-    // Simple highlighting - find the clause content in the original text
-    if (clauseContent && text.includes(clauseContent)) {
-      return text.replace(
-        clauseContent,
-        `<span class="clause-highlight selected" id="clause-${selectedClause}">${clauseContent}</span>`
-      );
-    }
-
-    return text;
-  };
-
   return (
     <div className="comparison-container">
-      {/* Original Document Viewer */}
+      {/* Original Document Panel */}
       <div className="comparison-panel">
-        <div className="panel-title">
-          <i className="fas fa-file-pdf"></i>
+        <div className="panel-header">
           Original Document
         </div>
-        <div 
-          className="pdf-viewer"
-          ref={leftViewerRef}
-          onScroll={() => handleScroll(leftViewerRef, rightViewerRef)}
-        >
-          <div className="document-page">
-            <div 
-              className="original-text"
-              dangerouslySetInnerHTML={{
-                __html: highlightOriginalText(originalText, clauses, selectedClause)
-              }}
-            />
-          </div>
-          <div className="scroll-indicator">
-            <i className="fas fa-sync-alt"></i>
-          </div>
+        <div className="panel-content" ref={leftViewerRef}>
+          {clauses.map((clause, index) => (
+            <div
+              key={index}
+              className={`clause-box original-clause ${
+                hoveredClause === index ? 'hovered' : ''
+              } ${selectedClause === index ? 'selected' : ''}`}
+              data-clause-index={index}
+              onMouseEnter={() => handleClauseHover(index)}
+              onMouseLeave={() => handleClauseHover(null)}
+              onClick={() => handleClauseClick(index)}
+            >
+              <div className="clause-header">
+                Clause {index + 1} - {clause.clause_name || `Section ${index + 1}`}
+              </div>
+              <div className="clause-body">
+                {clause.content}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
-      {/* Simplified Document Viewer */}
+      {/* Simplified Document Panel */}
       <div className="comparison-panel">
-        <div className="panel-title">
-          <i className="fas fa-lightbulb"></i>
-          Plain English Explanations
+        <div className="panel-header">
+          Simplified Document  
         </div>
-        <div 
-          className="pdf-viewer"
-          ref={rightViewerRef}
-          onScroll={() => handleScroll(rightViewerRef, leftViewerRef)}
-        >
-          <div className="simplified-page">
-            {clauses.map((clause, index) => (
-              <div 
-                key={index}
-                className={`simplified-clause ${
-                  hoveredClause === index ? 'highlighted' : ''
-                } ${selectedClause === index ? 'selected' : ''}`}
-                onMouseEnter={() => onClauseHover(index)}
-                onMouseLeave={() => onClauseHover(null)}
-                onClick={() => handleClauseClick(index)}
-              >
-                <div className="simple-title">
-                  {clause.simple_title || clause.clause_name}
-                </div>
-                
+        <div className="panel-content" ref={rightViewerRef}>
+          {clauses.map((clause, index) => (
+            <div
+              key={index}
+              className={`clause-box simplified-clause ${
+                hoveredClause === index ? 'hovered' : ''
+              } ${selectedClause === index ? 'selected' : ''}`}
+              data-clause-index={index}
+              onMouseEnter={() => handleClauseHover(index)}
+              onMouseLeave={() => handleClauseHover(null)}
+              onClick={() => handleClauseClick(index)}
+            >
+              <div className="clause-header">
+                Clause {index + 1} - Simple Summary
+              </div>
+              <div className="clause-body">
                 {clause.plain_english_summary && (
-                  <div className="plain-english-summary">
+                  <div className="summary">
                     <strong>In Plain English:</strong> {clause.plain_english_summary}
                   </div>
                 )}
@@ -558,23 +593,156 @@ const PDFViewerComparison = ({ originalText, clauses, hoveredClause, onClauseHov
                 )}
 
                 {clause.potential_impact && (
-                  <div className="impact-section">
-                    <strong>What this means for you:</strong> {clause.potential_impact}
-                  </div>
-                )}
-
-                {clause.red_flags && (
-                  <div className={`red-flags ${clause.red_flags.toLowerCase().includes('none') ? 'safe' : 'warning'}`}>
-                    <strong>Red Flags:</strong> {clause.red_flags}
+                  <div className="impact">
+                    <strong>Impact:</strong> {clause.potential_impact}
                   </div>
                 )}
               </div>
-            ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Risk Analysis Component
+const RiskAnalysis = ({ riskAssessment }) => {
+  // Debug what we're receiving
+  console.log('RiskAnalysis Component received:', riskAssessment);
+  
+  const getRiskColor = (riskLevel) => {
+    if (riskLevel >= 76) return '#e53e3e'; // Critical - Red
+    if (riskLevel >= 51) return '#dd6b20'; // High - Orange  
+    if (riskLevel >= 26) return '#d69e2e'; // Moderate - Yellow
+    return '#38a169'; // Low - Green
+  };
+
+  const getRiskCategory = (riskLevel) => {
+    if (riskLevel >= 76) return 'Critical Risk';
+    if (riskLevel >= 51) return 'High Risk';
+    if (riskLevel >= 26) return 'Moderate Risk';
+    return 'Low Risk';
+  };
+
+  const overallRisk = riskAssessment?.overall_risk_level || 0;
+  const risks = riskAssessment?.risks || [];
+  const totalRisks = riskAssessment?.total_risks || 0;
+  const highestRisk = riskAssessment?.highest_risk || 0;
+
+  console.log('Risk metrics:', { overallRisk, risks, totalRisks, highestRisk });
+
+  return (
+    <div className="risk-analysis">
+      {/* Overall Risk Header */}
+      <div className="risk-header">
+        <div className="overall-risk-card">
+          <div className="overall-risk-title">
+            <i className="fas fa-shield-alt"></i>
+            Overall Document Risk
           </div>
-          <div className="scroll-indicator">
-            <i className="fas fa-sync-alt"></i>
+          <div className="overall-risk-score" style={{ color: getRiskColor(overallRisk) }}>
+            {overallRisk}%
+          </div>
+          <div className="overall-risk-category" style={{ color: getRiskColor(overallRisk) }}>
+            {getRiskCategory(overallRisk)}
+          </div>
+          <div className="risk-progress-bar">
+            <div 
+              className="risk-progress-fill"
+              style={{ 
+                width: `${overallRisk}%`,
+                backgroundColor: getRiskColor(overallRisk)
+              }}
+            ></div>
           </div>
         </div>
+
+        <div className="risk-metrics">
+          <div className="risk-metric">
+            <div className="risk-metric-value">{totalRisks}</div>
+            <div className="risk-metric-label">Risky Clauses</div>
+          </div>
+          <div className="risk-metric">
+            <div className="risk-metric-value">{highestRisk}%</div>
+            <div className="risk-metric-label">Highest Risk</div>
+          </div>
+          <div className="risk-metric">
+            <div className="risk-metric-value">{risks.filter(r => r.risk_level >= 76).length}</div>
+            <div className="risk-metric-label">Critical</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Risk Cards */}
+      <div className="risk-cards">
+        {risks.length === 0 ? (
+          <div className="no-risks">
+            <i className="fas fa-check-circle" style={{ color: '#38a169', fontSize: '3rem', marginBottom: '1rem' }}></i>
+            <h3>No Significant Risks Identified</h3>
+            <p>The AI analysis found no clauses with significant risk levels in this document.</p>
+          </div>
+        ) : (
+          risks.map((risk, index) => (
+            <div key={index} className="risk-card">
+              <div className="risk-card-header">
+                <div className="risk-info">
+                  <div className="risk-title">{risk.clause_name}</div>
+                  <div className="risk-category" style={{ color: getRiskColor(risk.risk_level) }}>
+                    {risk.risk_category}
+                  </div>
+                </div>
+                <div className="risk-score">
+                  <div className="risk-percentage" style={{ color: getRiskColor(risk.risk_level) }}>
+                    {risk.risk_level}%
+                  </div>
+                  <div className="risk-bar">
+                    <div 
+                      className="risk-bar-fill"
+                      style={{ 
+                        width: `${risk.risk_level}%`,
+                        backgroundColor: getRiskColor(risk.risk_level)
+                      }}
+                    ></div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="risk-content">
+                {risk.context && (
+                  <div className="risk-section">
+                    <strong>Context:</strong> {risk.context}
+                  </div>
+                )}
+
+                {risk.risky_statement && (
+                  <div className="risk-section risky-statement">
+                    <strong>Risky Statement:</strong> 
+                    <div className="highlighted-text">"{risk.risky_statement}"</div>
+                  </div>
+                )}
+
+                {risk.risk_reasoning && (
+                  <div className="risk-section">
+                    <strong>Why This Is Risky:</strong> {risk.risk_reasoning}
+                  </div>
+                )}
+
+                {risk.potential_consequences && (
+                  <div className="risk-section consequences">
+                    <strong>Potential Consequences:</strong> {risk.potential_consequences}
+                  </div>
+                )}
+
+                {risk.recommendations && (
+                  <div className="risk-section recommendations">
+                    <strong>Recommendations:</strong> {risk.recommendations}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

@@ -2,9 +2,10 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import json
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 import io
 
 # Import our existing modules
@@ -12,6 +13,7 @@ from config import Config, setup_logging
 from pdf_processor import PDFProcessor
 from bedrock_clause_extractor import BedrockClauseExtractor
 from clause_extractor import ClauseExtractor
+from bedrock_chat import BedrockChatbot
 
 # Setup logging
 setup_logging()
@@ -43,9 +45,24 @@ clause_extractor = ClauseExtractor()
 
 try:
     bedrock_extractor = BedrockClauseExtractor()
+    chatbot = BedrockChatbot()
 except Exception as e:
     bedrock_extractor = None
-    logger.warning(f"Bedrock extractor not available: {str(e)}")
+    chatbot = None
+    logger.warning(f"Bedrock services not available: {str(e)}")
+
+# Request models
+class ChatMessage(BaseModel):
+    role: str  # 'user' or 'assistant'
+    content: str
+
+class ChatRequest(BaseModel):
+    question: str
+    document_context: str
+    chat_history: Optional[List[Dict[str, str]]] = None
+
+class SuggestionsRequest(BaseModel):
+    document_context: str
 
 @app.get("/")
 async def read_root():
@@ -97,8 +114,10 @@ async def analyze_document(
             # Extract clauses with AI
             extracted_clauses = bedrock_extractor.extract_clauses_by_type(text)
             
-            # Get detailed clauses with simplification
-            detailed_clauses = bedrock_extractor.get_detailed_clauses(text, simplify_for_non_lawyers=True)
+            # Get detailed clauses with simplification and risk assessment
+            result = bedrock_extractor.get_detailed_clauses_with_risks(text, simplify_for_non_lawyers=True)
+            detailed_clauses = result.get('detailed_clauses', [])
+            risk_assessment = result.get('risk_assessment', {})
             
             return JSONResponse({
                 "success": True,
@@ -112,10 +131,12 @@ async def analyze_document(
                 "original_text": text,
                 "extracted_clauses": extracted_clauses,
                 "detailed_clauses": detailed_clauses,
+                "risk_assessment": risk_assessment,
                 "processing_metadata": {
                     "extraction_method": "bedrock_claude_llm_simplified",
                     "total_clauses_found": len(detailed_clauses),
-                    "has_simplification": True
+                    "has_simplification": True,
+                    "has_risk_assessment": True
                 }
             })
             
@@ -169,22 +190,13 @@ async def analyze_document(
 @app.get("/api/methods")
 async def get_available_methods():
     """Get available processing methods"""
-    methods = [
-        {
-            "id": "local",
-            "name": "Local Regex Processing",
-            "description": "Fast pattern-based extraction",
-            "available": True,
-            "speed": "Fast (< 1s)",
-            "features": ["Pattern matching", "Clause categorization"]
-        }
-    ]
+    methods = []
     
     if bedrock_extractor:
         methods.append({
             "id": "bedrock_llm", 
             "name": "AI-Powered Analysis",
-            "description": "Advanced AI with plain English explanations",
+            "description": "Advanced AI with plain English explanations and risk assessment",
             "available": True,
             "speed": "Moderate (30-60s)",
             "features": [
@@ -206,6 +218,53 @@ async def get_available_methods():
         })
     
     return {"methods": methods}
+
+@app.post("/api/chat")
+async def chat_with_document(request: ChatRequest):
+    """Chat with AI about the analyzed document"""
+    if not chatbot:
+        raise HTTPException(status_code=503, detail="Chatbot service not available")
+    
+    try:
+        response = chatbot.generate_response(
+            question=request.question,
+            document_context=request.document_context,
+            chat_history=request.chat_history
+        )
+        
+        return JSONResponse({
+            "success": True,
+            "response": response
+        })
+    except Exception as e:
+        logger.error(f"Error in chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
+
+@app.post("/api/chat/suggestions")
+async def get_chat_suggestions(request: SuggestionsRequest):
+    """Get suggested questions for the document"""
+    if not chatbot:
+        raise HTTPException(status_code=503, detail="Chatbot service not available")
+    
+    try:
+        suggestions = chatbot.suggest_questions(request.document_context)
+        
+        return JSONResponse({
+            "success": True,
+            "suggestions": suggestions
+        })
+    except Exception as e:
+        logger.error(f"Error getting suggestions: {str(e)}")
+        # Return default suggestions on error
+        return JSONResponse({
+            "success": True,
+            "suggestions": [
+                "What are the key terms in this document?",
+                "What risks should I be aware of?",
+                "Can you explain the main clauses?",
+                "What are my obligations?"
+            ]
+        })
 
 if __name__ == "__main__":
     import uvicorn
